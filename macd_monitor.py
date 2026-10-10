@@ -903,30 +903,78 @@ def rank_key(r):
     eff_dir = r["direction"] or leaning(r)
     return (lvl, pts, sub, 1 if eff_dir == "bear" else 0)
 
-def build_analysis_prompt(rank_data, main_tf, trigger_tf):
+def build_analysis_prompt(rank_data, main_tf, trigger_tf,
+                          chain_tfs=None, confirm_tfs=None, plan_style=None):
     """
     產生可直接貼給任意 AI（ChatGPT / Claude / Gemini 等）的深度分析 Prompt。
     本系統只做「技術面 + 量能」的程式化判定；Prompt 的用途是請另一個 AI
     補上本系統做不到的部分：基本面、新聞事件、產業比較、情緒面交叉驗證。
+
+    v2.11：內容為歷代版本的「超集」──舊版所有段落/欄位原樣保留，另補上
+    系統設定、評分規則、各時框完整明細、量能/VWAP、斐波那契全部位、
+    交易建議與 ATR 參考位、主時框近 10 根 MACD 表、輸出格式要求。
     """
     if not rank_data:
         return ""
     ranked = sorted(rank_data, key=rank_key, reverse=True)
-    ny = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
+    ny   = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d %H:%M ET")
+    syms = "、".join(r["symbol"] for r in ranked)
+
+    def sg(v, d=3):          # 帶正負號的數字，None 顯示為 —
+        return "—" if v is None else f"{v:+.{d}f}"
 
     L = []
     L.append(f"# 股票技術面排行分析請求（數據時間：{ny}）")
     L.append("")
-    L.append("以下是我用自建的 MACD 瀑布傳導 + RVOL/VWAP 量能計分系統，")
+    L.append("以下是我用自建的 MACD 瀑布傳導 + RVOL/VWAP/斐波那契 量能計分系統，")
     L.append(f"對多支股票在 {main_tf} 主時框、{trigger_tf} 觸發時框下跑出的技術面排行結果。")
     _vk = next((r.get("vwap_kind") for r in rank_data if r.get("vwap_kind")), None)
     if _vk:
         L.append(f"（VWAP 定義：{_vk}；日內為當日錨定，日/週線為 20 期滾動成交量加權均價）")
+
+    # ── 系統設定 ───────────────────────────────────────────
+    L.append("")
+    L.append("## 系統設定")
+    L.append(f"- 標的（{len(ranked)} 支）：{syms}")
+    L.append(f"- 主時框：{main_tf}｜觸發時框：{trigger_tf}")
+    if chain_tfs:
+        L.append("- 傳導鏈（由小到大）：" + " → ".join(chain_tfs))
+    if confirm_tfs:
+        L.append("- 確認時框：" + "、".join(confirm_tfs))
+    if plan_style:
+        L.append(f"- 交易建議風格：{plan_style}"
+                 "（穩健＝等收盤確認、1.5×ATR 止損；激進＝訊號 bar 即進場、1.0×ATR 止損）")
+    L.append("- 所有訊號判定只用「已收盤」K 線；標示「形成中」的數值是尚未收盤的預覽，請勿當成確認訊號")
+    L.append("- Hist＝MACD 柱狀圖；D+1/D+2/D+3＝以最近 3 根線性外推的未來 3 根預測值")
+
+    # ── 評分規則 ───────────────────────────────────────────
+    L.append("")
+    L.append("## 評分規則（請據此解讀分數）")
+    L.append("- 事件分：Histogram 翻轉 +2｜D+1 預測翻轉 +1｜動能加速（連 3 根遞減/遞增且幅度 >1.5σ）+2｜開盤缺口 ≥1.5% +3")
+    L.append("- 確認時框同向：每個 +1")
+    L.append("- 量能（依已收盤 K 線陰/陽記方向）：RVOL ≥2.5 +3｜1.5–2.5 +1｜<0.8 −2（縮量壓制訊號）")
+    L.append("- VWAP 位置：價格在 VWAP 下方 → 空方 +1；上方 → 多方 +1")
+    L.append("- 斐波那契：價格距 38.2/50/61.8/78.6% 任一回撤位 ≤0.5×ATR → 該位為支撐＝多方加分、為壓力＝空方加分；61.8% +2、其餘 +1")
+    L.append(f"- 判定：必須先有至少一個「事件分」才能發警報（確認同向/量能/VWAP/斐波那契只能加成、不能單獨發起）；"
+             f"≥{ALERT_RED} 分＝🔴 紅色警報、{ALERT_YELLOW}–{ALERT_RED-1} 分＝🟠 橙色觀察、<{ALERT_YELLOW} 分＝靜默；"
+             "無正式警報時改用「潛在傾向分」（底層多/空分數）排序")
+
+    # ── 分析任務（原 1–4 項原樣保留，新增 5–7 項）──────────
+    L.append("")
     L.append("請你在此技術面基礎上，補充做以下深度分析：")
     L.append("1. 逐一檢查近期基本面／財報／新聞事件，是否與技術面訊號吻合或衝突")
     L.append("2. 若有多支同向訊號，比較哪一支的風險報酬比最佳，並說明原因")
     L.append("3. 指出技術面看似強烈、但基本面有潛在風險的標的（反之亦然）")
     L.append("4. 給出這批股票的優先順序建議（若只能選 1–2 支操作）")
+    L.append("5. 驗證各標的的斐波那契關鍵位、VWAP、ATR 止損/目標是否合理，必要時給出你認為更好的進場、止損、目標價位")
+    L.append("6. 檢查各時框 Histogram 是否有方向衝突或背離（例如大時框多、小時框空），並說明應以哪個時框為主")
+    L.append("7. 針對下一個交易日，給出情境推演（上漲／盤整／下跌各自的觸發條件與關鍵價位）")
+    L.append("")
+    L.append("輸出要求：請用繁體中文；先給一張總結表"
+             "（代碼｜方向｜進場價｜止損價｜目標價｜風險報酬比｜信心）再逐檔說明；"
+             "請給出具體價位與明確方向，避免模稜兩可的描述。")
+
+    # ── 排行結果 ───────────────────────────────────────────
     L.append("")
     L.append("## 排行結果（依警報等級與評分排序；無正式警報時退回「潛在傾向分」排序）")
     all_silent = all(r["pts"] == 0 for r in ranked)
@@ -936,8 +984,8 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf):
                   "下表的「方向/評分」是尚未達門檻的潛在傾向分，僅供參考，"
                   "請勿當作已確認的技術訊號來解讀。")
     L.append("")
-    L.append("| 排名 | 代碼 | 方向 | 等級 | 評分 | 收盤 | ATR% | 趨勢 | RVOL | VWAP位置 | 斐波那契 |")
-    L.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    L.append("| 排名 | 代碼 | 方向 | 等級 | 評分 | 多/空潛在分 | 收盤 | ATR% | 趨勢 | RVOL | VWAP位置 | 斐波那契 |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(ranked, 1):
         eff_dir = r["direction"] or leaning(r)
         sub     = max(r.get("bull_pts", 0), r.get("bear_pts", 0))
@@ -956,18 +1004,63 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf):
                 f"({r['fib']['nearest_level']:.2f}，{r['fib']['dist_pct']:+.2f}%)"
                 if r.get("fib") else "—")
         L.append(f"| {i} | {r['symbol']} | {dirn} | {lvl} | {score_disp} | "
+                  f"{r.get('bull_pts',0)}/{r.get('bear_pts',0)} | "
                   f"{r['close']:.2f} | {r['atr_pct']:.2f}% | {r['trend']} | {rvol} | {vwapp} | {fibp} |")
 
+    # ── 各標的技術細節 ─────────────────────────────────────
     L.append("")
     L.append("## 各標的技術細節")
     for r in ranked:
+        trig = r.get("trig") or {}
         L.append(f"\n### {r['symbol']}")
+
+        # 價格 / ATR
+        pp = [f"主時框({main_tf})最新收盤 {r['close']:.2f}"]
+        if r.get("close_c") is not None:
+            pp.append(f"觸發時框已收盤價 {r['close_c']:.2f}")
+        if trig.get("close") is not None:
+            pp.append(f"觸發時框即時價 {trig['close']:.2f}")
+        pp.append(f"主時框 ATR {r['atr']:.3f}（{r['atr_pct']:.2f}%）")
+        if trig.get("atr"):
+            pp.append(f"觸發時框 ATR {trig['atr']:.3f}")
+        L.append("- 價格與波動：" + "｜".join(pp))
+        L.append(f"- 多空潛在分：多 {r.get('bull_pts',0)}｜空 {r.get('bear_pts',0)}"
+                 f"｜確認時框同向 {r['score']}/{r['max']}")
+
+        # 舊版既有段落（原樣保留）
         if r["atype"]:
             L.append(f"- 判定：{r['atype']}")
         if r.get("detail"):
             L.append(f"- 評分依據：{'；'.join(r['detail'])}")
         if r.get("gap_pct") is not None and abs(r["gap_pct"]) >= 0.003:
             L.append(f"- 開盤缺口：{r['gap_pct']*100:+.2f}%")
+
+        # 量能與位置
+        vp = []
+        if r.get("rvol") is not None:
+            rv  = r["rvol"]
+            tag = "機構級" if rv >= 2.5 else ("放量" if rv >= 1.5 else ("縮量" if rv < 0.8 else "正常"))
+            vp.append(f"RVOL {rv:.2f}×（{tag}）")
+        if r.get("vwap") and r.get("below_vwap") is not None:
+            cc = r.get("close_c", r["close"])
+            vp.append(f"{r.get('vwap_kind') or 'VWAP'} {r['vwap']:.2f}，已收盤價 {cc:.2f} 在"
+                      f"{'下方' if r['below_vwap'] else '上方'} {abs(cc/r['vwap']-1)*100:.2f}%")
+        if vp:
+            L.append("- 量能與位置：" + "｜".join(vp))
+
+        # 觸發時框明細
+        if trig.get("valid"):
+            L.append(f"- 觸發時框 {trigger_tf} Histogram：已收盤 {sg(trig.get('hist_c'))}"
+                     f"（前根 {sg(trig.get('hist_c_prev'))}）｜形成中 {sg(trig.get('hist'))}"
+                     f"｜D+1 {sg(trig.get('d1'))} / D+2 {sg(trig.get('d2'))} / D+3 {sg(trig.get('d3'))}")
+            fl = []
+            if trig.get("accel_dn"): fl.append("空頭加速（>1.5σ）")
+            if trig.get("accel_up"): fl.append("多頭加速（>1.5σ）")
+            if trig.get("sigma"):    fl.append(f"Hist 滾動 σ={trig['sigma']:.3f}")
+            if fl:
+                L.append("- 觸發時框動能：" + "｜".join(fl))
+
+        # 斐波那契（摘要原樣保留 + 全部位）
         fb = r.get("fib")
         if fb:
             sw = "上升段回撤" if fb["swing"] == "up" else "下降段反彈"
@@ -975,6 +1068,12 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf):
                      f"38.2%={fb['levels'][0.382]:.2f}、50%={fb['levels'][0.5]:.2f}、"
                      f"61.8%={fb['levels'][0.618]:.2f}；延伸 127.2%={fb['levels'][1.272]:.2f}、"
                      f"161.8%={fb['levels'][1.618]:.2f}")
+            L.append("- 斐波那契全部位：" + "、".join(
+                f"{x*100:.1f}%={fb['levels'][x]:.2f}" for x in (FIB_RETR + FIB_EXT)))
+            L.append(f"- 斐波那契最近位：{fb['nearest_ratio']*100:.1f}%＝{fb['nearest_level']:.2f}"
+                     f"（{fb['role']}，價格偏離 {fb['dist_pct']:+.2f}%）")
+
+        # 各時框（舊版單行原樣保留 + 完整明細表）
         casc = r.get("cascade") or []
         if casc:
             tf_line = "、".join(
@@ -982,6 +1081,49 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf):
                 for c in casc if c.get("hist") is not None
             )
             L.append(f"- 各時框 Histogram：{tf_line}")
+            L.append("")
+            L.append("| 時框 | 角色 | Hist(已收盤) | Hist(形成中) | D+1 | D+2 | D+3 | 狀態 | 趨勢 | ATR |")
+            L.append("|---|---|---|---|---|---|---|---|---|---|")
+            for c in casc:
+                L.append(f"| {c['tf']} | {c.get('role') or '—'} | {sg(c.get('hist'))} | "
+                         f"{sg(c.get('hist_live'))} | {sg(c.get('d1'))} | {sg(c.get('d2'))} | "
+                         f"{sg(c.get('d3'))} | {c.get('status') or '—'} | {c.get('trend') or '—'} | "
+                         f"{('%.3f' % c['atr']) if c.get('atr') else '—'} |")
+            L.append("")
+
+        # 交易建議（有警報時）
+        if r["alert"] and trig.get("valid"):
+            style = plan_style or "穩健"
+            plan  = build_trade_plan(r["direction"], r["level"], r["pts"], trig, style)
+            if plan:
+                L.append(f"- 交易建議（{style}）：")
+                for p in plan:
+                    if p.strip().startswith("【"):
+                        continue
+                    L.append(f"  - {p.strip()}")
+
+        # ATR 參考位（無論有無警報，給具體價位）
+        ap, px = trig.get("atr"), trig.get("close")
+        if ap and px:
+            L.append(f"- 日內參考位（觸發時框 ATR {ap:.3f}，以即時價 {px:.2f} 為基準）："
+                     f"多單 止損 {px-1.5*ap:.2f}｜目標 {px+2.0*ap:.2f} / {px+3.5*ap:.2f}；"
+                     f"空單 止損 {px+1.5*ap:.2f}｜目標 {px-2.0*ap:.2f} / {px-3.5*ap:.2f}")
+        am, cm = r.get("atr"), r.get("close")
+        if am and cm:
+            L.append(f"- 波段參考位（主時框 {main_tf} ATR {am:.3f}，以收盤 {cm:.2f} 為基準）："
+                     f"多單 止損 {cm-1.5*am:.2f}｜目標 {cm+2.0*am:.2f} / {cm+3.5*am:.2f}；"
+                     f"空單 止損 {cm+1.5*am:.2f}｜目標 {cm-2.0*am:.2f} / {cm-3.5*am:.2f}")
+
+        # 主時框近 10 根 K 線 MACD
+        mrows = r.get("macd_rows") or []
+        if mrows:
+            L.append(f"- 主時框 {main_tf} 近 {len(mrows)} 根 K 線 MACD：")
+            L.append("")
+            L.append("| 日期 | 收盤 | MACD | Hist | 狀態 |")
+            L.append("|---|---|---|---|---|")
+            for m in mrows:
+                L.append(f"| {m['date']} | {m['close']} | {m['macd']} | {m['hist']} | {m['status']} |")
+            L.append("")
 
     L.append("")
     L.append("---")
@@ -2084,8 +2226,18 @@ for symbol in symbols:
             "gap_pct": trig_d.get("gap_pct"),
             "trigger_tf": trigger_tf,
             "cascade": [
-                {"tf": r["tf"], "hist": r.get("hist_c", r.get("hist")), "d1": r.get("d1")}
+                {"tf": r["tf"], "hist": r.get("hist_c", r.get("hist")), "d1": r.get("d1"),
+                 "hist_live": r.get("hist"), "d2": r.get("d2"), "d3": r.get("d3"),
+                 "status": r.get("status"), "trend": r.get("trend"), "atr": r.get("atr"),
+                 "role": ("觸發" if r["tf"] == trigger_tf
+                          else ("確認" if r["tf"] in confirm_tfs else None))}
                 for r in cascade if r.get("valid")
+            ],
+            "trig": trig_d,
+            "macd_rows": [
+                {"date": x["日線"], "close": x["收盤"], "macd": x["MACD"],
+                 "hist": x["Hist"], "status": x["狀態"]}
+                for _, x in df_t.iterrows()
             ],
         })
     else:
@@ -2148,7 +2300,9 @@ if rank_data:
     st.markdown("#### 📋 最佳股票分析 Prompt · 複製後貼入任意 AI 進行深度分析")
     st.caption("本系統只做技術面 + 量能的程式化判定；把下方內容貼給 ChatGPT / Claude / "
                "Gemini 等，可補上基本面、新聞、產業比較等本系統覆蓋不到的部分。")
-    prompt_text = build_analysis_prompt(rank_data, main_tf, trigger_tf)
+    prompt_text = build_analysis_prompt(rank_data, main_tf, trigger_tf,
+                                        chain_tfs=chain_tfs, confirm_tfs=confirm_tfs,
+                                        plan_style=plan_style)
     st.code(prompt_text, language="markdown")
 
 st.markdown("---")
