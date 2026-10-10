@@ -202,7 +202,7 @@ TIMEFRAME_MAP = {
     "1mo": {"period":"5y",   "interval":"1mo"},
 }
 
-DEFAULT_SYMBOLS = ["TSLA","AAPL","AMZN","NVDA","MSFT"]
+DEFAULT_SYMBOLS = ["QQQ", "TSLA", "TSLL", "SPCX", "AAPL", "GOOGL", "XPEV", "NIO", "META", "MSFT", "NVDA", "AMD", "INTC", "TSM", "XOM" , "VST", "RKLB", "ARM", "SNDK","MU","NKE"]
 
 # ── v2.7：大時框「形成中 bar」偵測 ──────────────────────────────
 # 日內時框（1m–1h）在 analyze_cascade() 已用 hist_c/hist_c_prev（永遠丟最後一根未收盤
@@ -972,7 +972,7 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf,
     L.append("")
     L.append("輸出要求：請用繁體中文；先給一張總結表"
              "（代碼｜方向｜進場價｜止損價｜目標價｜風險報酬比｜信心）再逐檔說明；"
-             "請給出具體價位與明確方向，避免模稜兩可的描述。")
+             "請給出具體價位與明確方向，避免模稜兩可的描述。最后將交易計劃表生成可以下載的JSON格式:啟用,代碼,方向(做多,做空),入場下限,入場上限,止損,止損上限(可空),目標1,目標2,目標3,R:R 風險回報比備註。")
 
     # ── 排行結果 ───────────────────────────────────────────
     L.append("")
