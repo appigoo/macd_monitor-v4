@@ -788,15 +788,27 @@ def make_ticks(labels, interval):
         prev = d
     return sel, tt
 
-def build_macd_chart(df, symbol, macd, signal, hist, interval="1d", overlays=None):
+def build_macd_chart(df, symbol, macd, signal, hist, interval="1d", overlays=None,
+                    show_volume=False, rvol=None):
     xl = fmt_labels(df.index,     interval)
     xm = fmt_labels(macd.index,   interval)
     xh = fmt_labels(hist.index,   interval)
     xs = fmt_labels(signal.index, interval)
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.52,0.48], vertical_spacing=0.05,
-                        subplot_titles=[f"{symbol} 收盤價", "MACD (12,26,9)"])
+    # v2.13：成交量副圖（價格 / 成交量 / MACD 三格）；無量能數據時退回原本兩格
+    has_vol = bool(show_volume and "Volume" in df.columns
+                   and float(df["Volume"].fillna(0).sum()) > 0)
+    mr = 3 if has_vol else 2                    # MACD 所在的 row
+    if has_vol:
+        fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                            row_heights=[0.46, 0.18, 0.36], vertical_spacing=0.045,
+                            subplot_titles=[f"{symbol} 收盤價",
+                                            "成交量（粗框＝RVOL≥2.5×｜淡色＝縮量 <0.8×）",
+                                            "MACD (12,26,9)"])
+    else:
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                            row_heights=[0.52,0.48], vertical_spacing=0.05,
+                            subplot_titles=[f"{symbol} 收盤價", "MACD (12,26,9)"])
 
     fig.add_trace(go.Scatter(x=xl, y=df["Close"].values, mode="lines",
         name="收盤價", line=dict(color="#5a7fa8",width=2)), row=1,col=1)
@@ -839,14 +851,35 @@ def build_macd_chart(df, symbol, macd, signal, hist, interval="1d", overlays=Non
                 annotation_position="top left",
                 annotation_font=dict(size=9, color=col), row=1, col=1)
 
+    if has_vol:
+        vol  = df["Volume"].fillna(0).values
+        up   = (df["Close"].values >= df["Open"].values)
+        vcol = ["#3d8b5e" if u else "#c0392b" for u in up]
+        n_   = len(vol)
+        op, lw = [0.70] * n_, [0.0] * n_
+        if rvol is not None and len(rvol) == n_:
+            for i, v in enumerate(rvol.values):
+                if pd.isna(v):
+                    continue
+                if   v >= 2.5: op[i], lw[i] = 1.00, 1.8      # 機構級放量：不透明 + 粗框
+                elif v >= 1.5: op[i]        = 0.90           # 顯著放量
+                elif v <  0.8: op[i]        = 0.35           # 縮量：淡化
+        fig.add_trace(go.Bar(x=xl, y=vol, name="成交量",
+            marker=dict(color=vcol, opacity=op,
+                        line=dict(color="#222", width=lw))), row=2, col=1)
+        vma = pd.Series(vol).rolling(20, min_periods=5).mean()
+        fig.add_trace(go.Scatter(x=xl, y=vma.values, mode="lines", name="均量(20)",
+            line=dict(color="#e07b39", width=1.4)), row=2, col=1)
+        fig.update_yaxes(tickformat=".2s", row=2, col=1)
+
     colors = ["#3d8b5e" if v>=0 else "#c0392b" for v in hist.values]
     fig.add_trace(go.Bar(x=xh, y=hist.values, name="Histogram",
-        marker_color=colors, opacity=0.85), row=2,col=1)
+        marker_color=colors, opacity=0.85), row=mr,col=1)
     fig.add_trace(go.Scatter(x=xm, y=macd.values, mode="lines", name="MACD",
-        line=dict(color="#5a7fa8",width=1.5)), row=2,col=1)
+        line=dict(color="#5a7fa8",width=1.5)), row=mr,col=1)
     fig.add_trace(go.Scatter(x=xs, y=signal.values, mode="lines", name="Signal",
-        line=dict(color="#e07b39",width=1.5,dash="dot")), row=2,col=1)
-    fig.add_hline(y=0, line_dash="dot", line_color="#bbb", row=2, col=1)
+        line=dict(color="#e07b39",width=1.5,dash="dot")), row=mr,col=1)
+    fig.add_hline(y=0, line_dash="dot", line_color="#bbb", row=mr, col=1)
 
     tv, tt = make_ticks(xl, interval)
     xcfg = dict(type="category", tickvals=tv, ticktext=tt,
@@ -856,9 +889,11 @@ def build_macd_chart(df, symbol, macd, signal, hist, interval="1d", overlays=Non
         font=dict(family="IBM Plex Mono, Noto Sans TC", color="#2c2c2c", size=11),
         margin=dict(l=10,r=10,t=36,b=20),
         legend=dict(orientation="h", y=1.02, x=0),
-        height=480, xaxis_rangeslider_visible=False,
+        height=620 if has_vol else 480, xaxis_rangeslider_visible=False,
         xaxis=xcfg, xaxis2=xcfg,
     )
+    if has_vol:
+        fig.update_layout(xaxis3=xcfg)
     fig.update_yaxes(gridcolor="#e8e3da", zeroline=True, zerolinecolor="#c0bbb2")
     return fig
 
@@ -1977,6 +2012,7 @@ with st.sidebar:
     show_fib  = st.checkbox("斐波那契線",         value=True, key="ov_fib")
     show_sr   = st.checkbox("支撐／壓力線",        value=True, key="ov_sr")
     show_vwap = st.checkbox("主力成本線（VWAP）",  value=True, key="ov_vwap")
+    show_vol  = st.checkbox("成交量副圖",          value=True, key="ov_vol")
 
     st.markdown("---")
     st.markdown("**⏱ 自動刷新**")
@@ -2292,9 +2328,11 @@ for symbol in symbols:
             overlays["vwap"]       = _vw.tail(60)
             overlays["vwap_label"] = ("主力成本線（當日VWAP）" if _intr
                                       else "主力成本線（20期滾動VWAP）")
+        _rv = (calc_rvol(df_main) if _intr else calc_rvol_simple(df_main)).tail(60)
         fig = build_macd_chart(cdf, symbol,
                                 macd_s.tail(60), sig_s.tail(60), hist_s.tail(60),
-                                interval=tf_cfg["interval"], overlays=overlays)
+                                interval=tf_cfg["interval"], overlays=overlays,
+                                show_volume=show_vol, rvol=_rv)
         st.plotly_chart(fig, use_container_width=True, key=f"macd_chart_{symbol}")
 
     # ── Telegram 信號 ─────────────────────────────────────────
