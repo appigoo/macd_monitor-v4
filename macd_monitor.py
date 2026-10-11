@@ -202,7 +202,7 @@ TIMEFRAME_MAP = {
     "1mo": {"period":"5y",   "interval":"1mo"},
 }
 
-DEFAULT_SYMBOLS = ["QQQ", "TSLA", "TSLL", "SPCX", "AAPL", "GOOGL", "XPEV", "NIO", "META", "MSFT", "NVDA", "AMD", "INTC", "TSM", "XOM" , "VST", "RKLB", "ARM", "SNDK","MU","NKE"]
+DEFAULT_SYMBOLS = ["TSLA","AAPL","AMZN","NVDA","MSFT"]
 
 # ── v2.7：大時框「形成中 bar」偵測 ──────────────────────────────
 # 日內時框（1m–1h）在 analyze_cascade() 已用 hist_c/hist_c_prev（永遠丟最後一根未收盤
@@ -339,6 +339,47 @@ def calc_fib_levels(df, lookback=60):
         "levels": levels, "nearest_ratio": nearest_r,
         "nearest_level": nearest_v, "dist_pct": dist_pct, "role": role,
     }
+
+def calc_sr_levels(df, window=5, tol_pct=0.006, max_each=3):
+    """
+    支撐／壓力線（擺動高低點聚類）。
+    1) 左右各 window 根都不比它更高/更低的 K 線，記為擺動高點/低點（pivot）；
+       最後 window 根還無法確認，不納入（不會因新 K 線而重繪）。
+    2) 價差 ≤ tol_pct 的 pivot 合併為同一價位，觸及次數越多越強。
+    3) 現價下方取最強 max_each 個為「支撐」、上方取最強 max_each 個為「壓力」；
+       至少觸及 2 次才算可靠，若一個都沒有則退而取最近的單點，避免整張圖空白。
+    """
+    n = len(df)
+    if n < window * 2 + 3:
+        return []
+    hi = df["High"].values; lo = df["Low"].values
+    px = float(df["Close"].iloc[-1])
+    piv = []
+    for i in range(window, n - window):
+        if hi[i] >= hi[i-window:i+window+1].max(): piv.append((float(hi[i]), i))
+        if lo[i] <= lo[i-window:i+window+1].min(): piv.append((float(lo[i]), i))
+    if not piv:
+        return []
+    piv.sort()
+    clusters = []                       # [價格清單, 位置清單]
+    for p, i in piv:
+        if clusters and abs(p / (sum(clusters[-1][0]) / len(clusters[-1][0])) - 1) <= tol_pct:
+            clusters[-1][0].append(p); clusters[-1][1].append(i)
+        else:
+            clusters.append([[p], [i]])
+    lv = [{"price": sum(ps)/len(ps), "touches": len(ps), "last_i": max(ids)}
+          for ps, ids in clusters]
+
+    def pick(lst):
+        strong = sorted([c for c in lst if c["touches"] >= 2],
+                        key=lambda c: (-c["touches"], -c["last_i"]))[:max_each]
+        if not strong and lst:
+            strong = sorted(lst, key=lambda c: abs(c["price"] - px))[:1]
+        return strong
+
+    out = [dict(c, kind="支撐") for c in pick([c for c in lv if c["price"] < px])]
+    out += [dict(c, kind="壓力") for c in pick([c for c in lv if c["price"] > px])]
+    return out
 
 def calc_rolling_vwap(df, n=20):
     """
@@ -747,7 +788,7 @@ def make_ticks(labels, interval):
         prev = d
     return sel, tt
 
-def build_macd_chart(df, symbol, macd, signal, hist, interval="1d"):
+def build_macd_chart(df, symbol, macd, signal, hist, interval="1d", overlays=None):
     xl = fmt_labels(df.index,     interval)
     xm = fmt_labels(macd.index,   interval)
     xh = fmt_labels(hist.index,   interval)
@@ -759,6 +800,44 @@ def build_macd_chart(df, symbol, macd, signal, hist, interval="1d"):
 
     fig.add_trace(go.Scatter(x=xl, y=df["Close"].values, mode="lines",
         name="收盤價", line=dict(color="#5a7fa8",width=2)), row=1,col=1)
+
+    # ── v2.12 價格圖疊加：主力成本線 / 斐波那契 / 支撐壓力 ──────────────
+    if overlays:
+        _c  = df["Close"].dropna()
+        _lo, _hi = float(_c.min()), float(_c.max())
+        _pad = (_hi - _lo) * 0.08 if _hi > _lo else _hi * 0.01
+        _vis = lambda v: (_lo - _pad) <= v <= (_hi + _pad)   # 只畫落在可視範圍內的線，避免價格被壓扁
+
+        vw = overlays.get("vwap")
+        if vw is not None and len(vw) == len(df) and vw.notna().any():
+            fig.add_trace(go.Scatter(x=xl, y=vw.values, mode="lines",
+                name=overlays.get("vwap_label", "主力成本線（VWAP）"),
+                line=dict(color="#8e44ad", width=2.4)), row=1, col=1)
+
+        fb = overlays.get("fib")
+        if fb:
+            _sty = {0.0:("#6b6b6b","solid",1.0), 1.0:("#6b6b6b","solid",1.0),
+                    0.236:("#b0b0b0","dash",1.0), 0.382:("#8c8c8c","dash",1.2),
+                    0.5:("#8e6bbf","dash",1.2), 0.618:("#c9a227","dash",2.0),
+                    0.786:("#8c8c8c","dash",1.2),
+                    1.272:("#b07a3a","dot",1.2), 1.618:("#b07a3a","dot",1.2)}
+            for r_, (col, dsh, wd) in _sty.items():
+                v_ = fb["levels"].get(r_)
+                if v_ is None or not _vis(v_):
+                    continue
+                fig.add_hline(y=v_, line_color=col, line_dash=dsh, line_width=wd,
+                    annotation_text=f"Fib {r_*100:.1f}%  {v_:.2f}",
+                    annotation_position="top right",
+                    annotation_font=dict(size=9, color=col), row=1, col=1)
+
+        for lv in (overlays.get("sr") or []):
+            if not _vis(lv["price"]):
+                continue
+            col = "#3d8b5e" if lv["kind"] == "支撐" else "#c0392b"
+            fig.add_hline(y=lv["price"], line_color=col, line_dash="dashdot", line_width=1.6,
+                annotation_text=f"{lv['kind']} {lv['price']:.2f} ×{lv['touches']}",
+                annotation_position="top left",
+                annotation_font=dict(size=9, color=col), row=1, col=1)
 
     colors = ["#3d8b5e" if v>=0 else "#c0392b" for v in hist.values]
     fig.add_trace(go.Bar(x=xh, y=hist.values, name="Histogram",
@@ -972,7 +1051,7 @@ def build_analysis_prompt(rank_data, main_tf, trigger_tf,
     L.append("")
     L.append("輸出要求：請用繁體中文；先給一張總結表"
              "（代碼｜方向｜進場價｜止損價｜目標價｜風險報酬比｜信心）再逐檔說明；"
-             "請給出具體價位與明確方向，避免模稜兩可的描述。最后將交易計劃表生成可以下載的JSON格式:啟用,代碼,方向(做多,做空),入場下限,入場上限,止損,止損上限(可空),目標1,目標2,目標3,R:R 風險回報比備註。")
+             "請給出具體價位與明確方向，避免模稜兩可的描述。")
 
     # ── 排行結果 ───────────────────────────────────────────
     L.append("")
@@ -1894,6 +1973,11 @@ with st.sidebar:
              "激進：訊號 bar 即進場、1.0×ATR 緊止損、允許加倉、含持倉處置",
     )
 
+    st.markdown("**📊 圖表疊加**")
+    show_fib  = st.checkbox("斐波那契線",         value=True, key="ov_fib")
+    show_sr   = st.checkbox("支撐／壓力線",        value=True, key="ov_sr")
+    show_vwap = st.checkbox("主力成本線（VWAP）",  value=True, key="ov_vwap")
+
     st.markdown("---")
     st.markdown("**⏱ 自動刷新**")
     auto_refresh     = st.checkbox("啟用", value=True, key="auto_refresh_enabled",
@@ -2037,7 +2121,7 @@ for symbol in symbols:
         </div>""", unsafe_allow_html=True)
 
     # ── v2.10 斐波那契面板（主時框，已收盤 K 線）────────────────
-    fib_main = calc_fib_levels(df_main)
+    fib_main = calc_fib_levels(df_main.iloc[:-1] if (tf_cfg["interval"] in INTRADAY_IVS and len(df_main) > 1) else df_main)
     if fib_main:
         sw_txt = "上升段回撤（找支撐）" if fib_main["swing"] == "up" else "下降段反彈（找壓力）"
         rows_html = ""
@@ -2195,9 +2279,22 @@ for symbol in symbols:
     # ── MACD 圖表 ────────────────────────────────────────────
     with st.expander(f"📈 {symbol} MACD 圖表", expanded=True):
         cdf = df_main.tail(60)
+        # 疊加線：日內主時框丟掉形成中的最後一根（與其他訊號同一慣例）
+        _intr = tf_cfg["interval"] in INTRADAY_IVS
+        _ref  = df_main.iloc[:-1] if (_intr and len(df_main) > 1) else df_main
+        overlays = {}
+        if show_fib:
+            overlays["fib"] = calc_fib_levels(_ref)
+        if show_sr:
+            overlays["sr"]  = calc_sr_levels(_ref)
+        if show_vwap:
+            _vw = calc_vwap(df_main) if _intr else calc_rolling_vwap(df_main)
+            overlays["vwap"]       = _vw.tail(60)
+            overlays["vwap_label"] = ("主力成本線（當日VWAP）" if _intr
+                                      else "主力成本線（20期滾動VWAP）")
         fig = build_macd_chart(cdf, symbol,
                                 macd_s.tail(60), sig_s.tail(60), hist_s.tail(60),
-                                interval=tf_cfg["interval"])
+                                interval=tf_cfg["interval"], overlays=overlays)
         st.plotly_chart(fig, use_container_width=True, key=f"macd_chart_{symbol}")
 
     # ── Telegram 信號 ─────────────────────────────────────────
